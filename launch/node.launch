@@ -1,0 +1,6 @@
+<launch>
+  <node pkg="multi_object_tracking_lidar" name="lidar_tracker" type="kf_tracker">
+    <remap from="filtered_cloud" to="/sensors/lidar/front_mid/point_cloud"/>
+  </node>
+
+</launch>
