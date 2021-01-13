@@ -315,7 +315,7 @@ publish_cloud(ros::Publisher& pub, pcl::PointCloud<pcl::PointXYZ>::Ptr cluster)
 {
   sensor_msgs::PointCloud2::Ptr clustermsg(new sensor_msgs::PointCloud2);
   pcl::toROSMsg(*cluster, *clustermsg);
-  clustermsg->header.frame_id = "/map";
+  clustermsg->header.frame_id = "/base_link";
   clustermsg->header.stamp = ros::Time::now();
   pub.publish(*clustermsg);
 }
@@ -323,6 +323,27 @@ publish_cloud(ros::Publisher& pub, pcl::PointCloud<pcl::PointXYZ>::Ptr cluster)
 void
 cloud_cb(const sensor_msgs::PointCloud2ConstPtr& input)
 {
+  // pointcloud from msg
+  pcl::PointCloud<pcl::PointXYZ>::Ptr input_cloud(new pcl::PointCloud<pcl::PointXYZ>);
+  pcl::PointCloud<pcl::PointXYZ>::Ptr clustered_cloud(new pcl::PointCloud<pcl::PointXYZ>);
+
+  pcl::fromROSMsg(*input, *input_cloud);
+
+  // remove invalid pts (NaN, Inf)
+  std::shared_ptr<std::vector<int>> indices(new std::vector<int>);
+  pcl::removeNaNFromPointCloud(*input_cloud, *input_cloud, *indices);
+
+  // pcl::ExtractIndices<pcl::PointXYZ> extract;
+  // extract.setInputCloud(input_cloud);
+  // extract.setIndices(indices);
+  // extract.setNegative(true);
+  // extract.filter(*input_cloud);
+
+  // Creating the KdTree from input point cloud
+  pcl::search::KdTree<pcl::PointXYZ>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZ>);
+
+  tree->setInputCloud(input_cloud);
+
   // cout<<"IF firstFrame="<<firstFrame<<"\n";
   // If this is the first frame, initialize kalman filters for the clustered objects
   if (firstFrame)
@@ -371,14 +392,14 @@ cloud_cb(const sensor_msgs::PointCloud2ConstPtr& input)
     cv::setIdentity(KF5.measurementNoiseCov, cv::Scalar(sigmaQ));
 
     // Process the point cloud
-    pcl::PointCloud<pcl::PointXYZ>::Ptr input_cloud(new pcl::PointCloud<pcl::PointXYZ>);
-    pcl::PointCloud<pcl::PointXYZ>::Ptr clustered_cloud(new pcl::PointCloud<pcl::PointXYZ>);
-    /* Creating the KdTree from input point cloud*/
-    pcl::search::KdTree<pcl::PointXYZ>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZ>);
+    // pcl::PointCloud<pcl::PointXYZ>::Ptr input_cloud(new pcl::PointCloud<pcl::PointXYZ>);
+    // pcl::PointCloud<pcl::PointXYZ>::Ptr clustered_cloud(new pcl::PointCloud<pcl::PointXYZ>);
+    // /* Creating the KdTree from input point cloud*/
+    // pcl::search::KdTree<pcl::PointXYZ>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZ>);
 
-    pcl::fromROSMsg(*input, *input_cloud);
+    // pcl::fromROSMsg(*input, *input_cloud);
 
-    tree->setInputCloud(input_cloud);
+    // tree->setInputCloud(input_cloud);
 
     std::vector<pcl::PointIndices> cluster_indices;
     pcl::EuclideanClusterExtraction<pcl::PointXYZ> ec;
@@ -504,14 +525,14 @@ cloud_cb(const sensor_msgs::PointCloud2ConstPtr& input)
   else
   {
     // cout<<"ELSE firstFrame="<<firstFrame<<"\n";
-    pcl::PointCloud<pcl::PointXYZ>::Ptr input_cloud(new pcl::PointCloud<pcl::PointXYZ>);
-    pcl::PointCloud<pcl::PointXYZ>::Ptr clustered_cloud(new pcl::PointCloud<pcl::PointXYZ>);
-    /* Creating the KdTree from input point cloud*/
-    pcl::search::KdTree<pcl::PointXYZ>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZ>);
+    // pcl::PointCloud<pcl::PointXYZ>::Ptr input_cloud(new pcl::PointCloud<pcl::PointXYZ>);
+    // pcl::PointCloud<pcl::PointXYZ>::Ptr clustered_cloud(new pcl::PointCloud<pcl::PointXYZ>);
+    // /* Creating the KdTree from input point cloud*/
+    // pcl::search::KdTree<pcl::PointXYZ>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZ>);
 
-    pcl::fromROSMsg(*input, *input_cloud);
+    // pcl::fromROSMsg(*input, *input_cloud);
 
-    tree->setInputCloud(input_cloud);
+    // tree->setInputCloud(input_cloud);
 
     /* Here we are creating a vector of PointIndices, which contains the actual index
      * information in a vector<int>. The indices of each detected cluster are saved here.
