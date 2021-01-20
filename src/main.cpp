@@ -1,5 +1,5 @@
-#include "kf_tracker/CKalmanFilter.h"
-#include "kf_tracker/featureDetection.h"
+// #include "kf_tracker/CKalmanFilter.h"
+// #include "kf_tracker/featureDetection.h"
 #include "opencv2/video/tracking.hpp"
 #include "pcl_ros/point_cloud.h"
 #include <algorithm>
@@ -62,6 +62,7 @@ ros::Publisher pub_cluster4;
 ros::Publisher pub_cluster5;
 
 ros::Publisher markerPub;
+ros::Publisher cc_pos;
 
 std::vector<geometry_msgs::Point> prevClusterCenters;
 
@@ -103,10 +104,10 @@ objID[0] corresponds to KFT0, objID[1] corresponds to KFT1 etc.
 std::pair<int, int>
 findIndexOfMin(std::vector<std::vector<float>> distMat)
 {
-  cout << "findIndexOfMin cALLED\n";
+  // cout << "findIndexOfMin cALLED\n";
   std::pair<int, int> minIndex;
   float minEl = std::numeric_limits<float>::max();
-  cout << "minEl=" << minEl << "\n";
+  // cout << "minEl=" << minEl << "\n";
   for (int i = 0; i < distMat.size(); i++)
     for (int j = 0; j < distMat.at(0).size(); j++)
     {
@@ -116,7 +117,7 @@ findIndexOfMin(std::vector<std::vector<float>> distMat)
         minIndex = std::make_pair(i, j);
       }
     }
-  cout << "minIndex=" << minIndex.first << "," << minIndex.second << "\n";
+  // cout << "minIndex=" << minIndex.first << "," << minIndex.second << "\n";
   return minIndex;
 }
 void
@@ -185,24 +186,24 @@ KFT(const std_msgs::Float32MultiArray ccs)
        copyOfClusterCenters[ID].y=10000;
        copyOfClusterCenters[ID].z=10000;
       */
-    cout << "filterN=" << filterN << "\n";
+    // cout << "filterN=" << filterN << "\n";
   }
 
-  cout << "distMat.size()" << distMat.size() << "\n";
-  cout << "distMat[0].size()" << distMat.at(0).size() << "\n";
+  // cout << "distMat.size()" << distMat.size() << "\n";
+  // cout << "distMat[0].size()" << distMat.at(0).size() << "\n";
   // DEBUG: print the distMat
-  for (const auto& row : distMat)
-  {
-    for (const auto& s : row)
-      std::cout << s << ' ';
-    std::cout << std::endl;
-  }
+  // for (const auto& row : distMat)
+  // {
+  //   for (const auto& s : row)
+  //     std::cout << s << ' ';
+  //   std::cout << std::endl;
+  // }
 
   for (int clusterCount = 0; clusterCount < 6; clusterCount++)
   {
     // 1. Find min(distMax)==> (i,j);
     std::pair<int, int> minIndex(findIndexOfMin(distMat));
-    cout << "Received minIndex=" << minIndex.first << "," << minIndex.second << "\n";
+    // cout << "Received minIndex=" << minIndex.first << "," << minIndex.second << "\n";
     // 2. objID[i]=clusterCenters[j]; counter++
     objID[minIndex.first] = minIndex.second;
 
@@ -213,7 +214,7 @@ KFT(const std_msgs::Float32MultiArray ccs)
       distMat[row][minIndex.second] = 10000.0;
     }
     // 4. if(counter<6) got to 1.
-    cout << "clusterCount=" << clusterCount << "\n";
+    // cout << "clusterCount=" << clusterCount << "\n";
   }
 
   // cout<<"Got object IDs"<<"\n";
@@ -303,6 +304,9 @@ KFT(const std_msgs::Float32MultiArray ccs)
     Mat estimated4 = KF4.correct(meas4Mat);
   if (!(meas5[0] == 0.0f || meas5[1] == 0.0f))
     Mat estimated5 = KF5.correct(meas5Mat);
+
+  Mat statePost = KF0.statePost;
+  cout << "statePost 0: " << endl << " " << statePost << endl << endl;
 
   // Publish the point clouds belonging to each clusters
 
@@ -615,6 +619,7 @@ cloud_cb(const sensor_msgs::PointCloud2ConstPtr& input)
       clusterCentroids.push_back(centroid);
     }
 
+    // Publish cluster mid-points.
     std_msgs::Float32MultiArray cc;
     for (int i = 0; i < 6; i++)
     {
@@ -622,18 +627,17 @@ cloud_cb(const sensor_msgs::PointCloud2ConstPtr& input)
       cc.data.push_back(clusterCentroids.at(i).y);
       cc.data.push_back(clusterCentroids.at(i).z);
     }
-    // cout<<"6 clusters initialized\n";
 
-    // cc_pos.publish(cc);// Publish cluster mid-points.
+    cc_pos.publish(cc);
+
     KFT(cc);
+
     int i = 0;
     bool publishedCluster[6];
     for (auto it = objID.begin(); it != objID.end(); it++)
-    { // cout<<"Inside the for loop\n";
-
+    {
       switch (i)
       {
-        cout << "Inside the switch case\n";
         case 0:
         {
           publish_cloud(pub_cluster0, cluster_vec[*it]);
@@ -711,9 +715,10 @@ main(int argc, char** argv)
   /* Point cloud clustering
    */
 
-  // cc_pos=nh.advertise<std_msgs::Float32MultiArray>("ccs",100);//clusterCenter1
+  cc_pos = nh.advertise<std_msgs::Float32MultiArray>("ccs", 100); // clusterCenter1
   markerPub = nh.advertise<visualization_msgs::MarkerArray>("viz", 1);
 
+  proccessed_pub_ = nh.advertise<PointCloud>("processed", 1);
   /* Point cloud clustering
    */
 
