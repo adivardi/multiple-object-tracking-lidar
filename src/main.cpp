@@ -38,6 +38,12 @@
 #include <visualization_msgs/Marker.h>
 #include <visualization_msgs/MarkerArray.h>
 
+#include <pcl/filters/passthrough.h>
+#include <pcl/filters/voxel_grid.h>
+#include <pcl_ros/impl/transforms.hpp>
+#include <pcl_ros/transforms.h>
+#include <tf/transform_listener.h>
+
 using namespace std;
 using namespace cv;
 
@@ -315,7 +321,7 @@ KFT(const std_msgs::Float32MultiArray ccs)
   // cout<<"DONE KF_TRACKER\n";
 }
 void
-publish_cloud(ros::Publisher& pub, pcl::PointCloud<pcl::PointXYZ>::Ptr cluster)
+publish_cloud(ros::Publisher& pub, pcl::PointCloud<pcl::PointXYZI>::Ptr cluster)
 {
   sensor_msgs::PointCloud2::Ptr clustermsg(new sensor_msgs::PointCloud2);
   pcl::toROSMsg(*cluster, *clustermsg);
@@ -324,29 +330,86 @@ publish_cloud(ros::Publisher& pub, pcl::PointCloud<pcl::PointXYZ>::Ptr cluster)
   pub.publish(*clustermsg);
 }
 
+// ------------------------- Adi ----------------------------
+typedef pcl::PointXYZI PointXYZI;
+typedef pcl::PointCloud<PointXYZI> PointCloud;
+std::string map_frame = "base_link";
+std::string base_frame = "base_link";
+float voxel_size = 0.05;
+float z_min = 0.4;
+float z_max = 2.5;
+float clustering_tolerance = 0.15;
+float min_pts_in_cluster = 50;
+ros::Publisher proccessed_pub_;
+
 void
-cloud_cb(const sensor_msgs::PointCloud2ConstPtr& input)
+filterGround(const PointCloud::ConstPtr& input, PointCloud::Ptr& processed)
 {
-  // pointcloud from msg
-  pcl::PointCloud<pcl::PointXYZ>::Ptr input_cloud(new pcl::PointCloud<pcl::PointXYZ>);
-  pcl::PointCloud<pcl::PointXYZ>::Ptr clustered_cloud(new pcl::PointCloud<pcl::PointXYZ>);
+  // TODO can be improved using normals and height
+  // currently just cut between z_min and z_max
 
-  pcl::fromROSMsg(*input, *input_cloud);
+  pcl::PassThrough<PointXYZI> pass_filter;
+  pass_filter.setInputCloud(input);
+  pass_filter.setFilterFieldName("z");
+  pass_filter.setFilterLimits(z_min, z_max);
+  // pass_filter.setFilterLimitsNegative(true);
+  pass_filter.filter(*processed);
+}
 
+void
+processPointCloud(const PointCloud::ConstPtr& input, PointCloud::Ptr& processed)
+{
   // remove invalid pts (NaN, Inf)
-  std::shared_ptr<std::vector<int>> indices(new std::vector<int>);
-  pcl::removeNaNFromPointCloud(*input_cloud, *input_cloud, *indices);
+  std::vector<int> indices;
+  pcl::removeNaNFromPointCloud(*input, *processed, indices);
 
-  // pcl::ExtractIndices<pcl::PointXYZ> extract;
-  // extract.setInputCloud(input_cloud);
-  // extract.setIndices(indices);
-  // extract.setNegative(true);
-  // extract.filter(*input_cloud);
+  // transform_pointcloud to map frame
+  tf::TransformListener tf_listener_;
+  tf_listener_.waitForTransform(
+      processed->header.frame_id, map_frame, fromPCL(processed->header).stamp, ros::Duration(5.0));
+  pcl_ros::transformPointCloud<PointXYZI>(map_frame, *processed, *processed, tf_listener_);
+
+  // voxel filter
+  pcl::VoxelGrid<PointXYZI> vox_filter;
+  vox_filter.setInputCloud(processed);
+  vox_filter.setLeafSize(voxel_size, voxel_size, voxel_size);
+  vox_filter.filter(*processed);
+
+  // remove ground
+  filterGround(processed, processed);
+}
+
+void
+// cloud_cb(const sensor_msgs::PointCloud2ConstPtr& input)
+cloud_cb(const PointCloud::ConstPtr& input_cloud)
+{
+  PointCloud::Ptr processed_cloud(new PointCloud);
+  processPointCloud(input_cloud, processed_cloud);
+
+  // publish processed pointcloud
+  proccessed_pub_.publish(processed_cloud->makeShared());
 
   // Creating the KdTree from input point cloud
-  pcl::search::KdTree<pcl::PointXYZ>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZ>);
+  pcl::search::KdTree<PointXYZI>::Ptr tree(new pcl::search::KdTree<PointXYZI>);
+  tree->setInputCloud(processed_cloud);
 
-  tree->setInputCloud(input_cloud);
+  // clustering
+  /* vector of PointIndices, which contains the actual index information in a vector<int>.
+  * The indices of each detected cluster are saved here.
+  * Cluster_indices is a vector containing one instance of PointIndices for each detected
+  * cluster.
+  */
+  std::vector<pcl::PointIndices> cluster_indices;
+  pcl::EuclideanClusterExtraction<pcl::PointXYZI> eucl_clustering;
+  eucl_clustering.setClusterTolerance(clustering_tolerance);
+  eucl_clustering.setMinClusterSize(min_pts_in_cluster);
+  // eucl_clustering.setMaxClusterSize(600);
+  eucl_clustering.setSearchMethod(tree);
+  eucl_clustering.setInputCloud(processed_cloud);
+  /* Extract the clusters out of pc and save indices in cluster_indices.*/
+  eucl_clustering.extract(cluster_indices);
+
+  std::cout << "cluster nu: " << cluster_indices.size() << std::endl;
 
   // cout<<"IF firstFrame="<<firstFrame<<"\n";
   // If this is the first frame, initialize kalman filters for the clustered objects
@@ -395,52 +458,32 @@ cloud_cb(const sensor_msgs::PointCloud2ConstPtr& input)
     cv::setIdentity(KF4.measurementNoiseCov, cv::Scalar(sigmaQ));
     cv::setIdentity(KF5.measurementNoiseCov, cv::Scalar(sigmaQ));
 
-    // Process the point cloud
-    // pcl::PointCloud<pcl::PointXYZ>::Ptr input_cloud(new pcl::PointCloud<pcl::PointXYZ>);
-    // pcl::PointCloud<pcl::PointXYZ>::Ptr clustered_cloud(new pcl::PointCloud<pcl::PointXYZ>);
-    // /* Creating the KdTree from input point cloud*/
-    // pcl::search::KdTree<pcl::PointXYZ>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZ>);
-
-    // pcl::fromROSMsg(*input, *input_cloud);
-
-    // tree->setInputCloud(input_cloud);
-
-    std::vector<pcl::PointIndices> cluster_indices;
-    pcl::EuclideanClusterExtraction<pcl::PointXYZ> ec;
-    ec.setClusterTolerance(0.08);
-    ec.setMinClusterSize(10);
-    ec.setMaxClusterSize(600);
-    ec.setSearchMethod(tree);
-    ec.setInputCloud(input_cloud);
-    /* Extract the clusters out of pc and save indices in cluster_indices.*/
-    ec.extract(cluster_indices);
-
     std::vector<pcl::PointIndices>::const_iterator it;
     std::vector<int>::const_iterator pit;
     // Vector of cluster pointclouds
-    std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> cluster_vec;
+    std::vector<pcl::PointCloud<pcl::PointXYZI>::Ptr> cluster_vec;
     // Cluster centroids
-    std::vector<pcl::PointXYZ> clusterCentroids;
+    std::vector<pcl::PointXYZI> clusterCentroids;
 
     for (it = cluster_indices.begin(); it != cluster_indices.end(); ++it)
     {
-      pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_cluster(new pcl::PointCloud<pcl::PointXYZ>);
+      pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_cluster(new pcl::PointCloud<pcl::PointXYZI>);
       float x = 0.0;
       float y = 0.0;
       int numPts = 0;
       for (pit = it->indices.begin(); pit != it->indices.end(); pit++)
       {
-        cloud_cluster->points.push_back(input_cloud->points[*pit]);
-        x += input_cloud->points[*pit].x;
-        y += input_cloud->points[*pit].y;
+        cloud_cluster->points.push_back(processed_cloud->points[*pit]);
+        x += processed_cloud->points[*pit].x;
+        y += processed_cloud->points[*pit].y;
         numPts++;
 
-        // dist_this_point = pcl::geometry::distance(input_cloud->points[*pit],
+        // dist_this_point = pcl::geometry::distance(processed_cloud->points[*pit],
         //                                          origin);
         // mindist_this_cluster = std::min(dist_this_point, mindist_this_cluster);
       }
 
-      pcl::PointXYZ centroid;
+      pcl::PointXYZI centroid;
       centroid.x = x / numPts;
       centroid.y = y / numPts;
       centroid.z = 0.0;
@@ -454,14 +497,15 @@ cloud_cb(const sensor_msgs::PointCloud2ConstPtr& input)
     // Ensure at least 6 clusters exist to publish (later clusters may be empty)
     while (cluster_vec.size() < 6)
     {
-      pcl::PointCloud<pcl::PointXYZ>::Ptr empty_cluster(new pcl::PointCloud<pcl::PointXYZ>);
-      empty_cluster->points.push_back(pcl::PointXYZ(0, 0, 0));
+      pcl::PointCloud<pcl::PointXYZI>::Ptr empty_cluster(new pcl::PointCloud<pcl::PointXYZI>);
+      pcl::PointXYZI pt;
+      empty_cluster->points.push_back(pt);
       cluster_vec.push_back(empty_cluster);
     }
 
     while (clusterCentroids.size() < 6)
     {
-      pcl::PointXYZ centroid;
+      pcl::PointXYZI centroid;
       centroid.x = 0.0;
       centroid.y = 0.0;
       centroid.z = 0.0;
@@ -529,67 +573,44 @@ cloud_cb(const sensor_msgs::PointCloud2ConstPtr& input)
   else
   {
     // cout<<"ELSE firstFrame="<<firstFrame<<"\n";
-    // pcl::PointCloud<pcl::PointXYZ>::Ptr input_cloud(new pcl::PointCloud<pcl::PointXYZ>);
-    // pcl::PointCloud<pcl::PointXYZ>::Ptr clustered_cloud(new pcl::PointCloud<pcl::PointXYZ>);
-    // /* Creating the KdTree from input point cloud*/
-    // pcl::search::KdTree<pcl::PointXYZ>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZ>);
 
-    // pcl::fromROSMsg(*input, *input_cloud);
 
-    // tree->setInputCloud(input_cloud);
-
-    /* Here we are creating a vector of PointIndices, which contains the actual index
-     * information in a vector<int>. The indices of each detected cluster are saved here.
-     * Cluster_indices is a vector containing one instance of PointIndices for each detected
-     * cluster. Cluster_indices[0] contain all indices of the first cluster in input point cloud.
-     */
-    std::vector<pcl::PointIndices> cluster_indices;
-    pcl::EuclideanClusterExtraction<pcl::PointXYZ> ec;
-    ec.setClusterTolerance(0.3);
-    ec.setMinClusterSize(10);
-    ec.setMaxClusterSize(600);
-    ec.setSearchMethod(tree);
-    ec.setInputCloud(input_cloud);
-    // cout<<"PCL init successfull\n";
-    /* Extract the clusters out of pc and save indices in cluster_indices.*/
-    ec.extract(cluster_indices);
-    // cout<<"PCL extract successfull\n";
     /* To separate each cluster out of the vector<PointIndices> we have to
      * iterate through cluster_indices, create a new PointCloud for each
      * entry and write all points of the current cluster in the PointCloud.
      */
-    // pcl::PointXYZ origin (0,0,0);
+    // pcl::PointXYZI origin (0,0,0);
     // float mindist_this_cluster = 1000;
     // float dist_this_point = 1000;
 
     std::vector<pcl::PointIndices>::const_iterator it;
     std::vector<int>::const_iterator pit;
     // Vector of cluster pointclouds
-    std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> cluster_vec;
+    std::vector<pcl::PointCloud<pcl::PointXYZI>::Ptr> cluster_vec;
 
     // Cluster centroids
-    std::vector<pcl::PointXYZ> clusterCentroids;
+    std::vector<pcl::PointXYZI> clusterCentroids;
 
     for (it = cluster_indices.begin(); it != cluster_indices.end(); ++it)
     {
       float x = 0.0;
       float y = 0.0;
       int numPts = 0;
-      pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_cluster(new pcl::PointCloud<pcl::PointXYZ>);
+      pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_cluster(new pcl::PointCloud<pcl::PointXYZI>);
       for (pit = it->indices.begin(); pit != it->indices.end(); pit++)
       {
-        cloud_cluster->points.push_back(input_cloud->points[*pit]);
+        cloud_cluster->points.push_back(processed_cloud->points[*pit]);
 
-        x += input_cloud->points[*pit].x;
-        y += input_cloud->points[*pit].y;
+        x += processed_cloud->points[*pit].x;
+        y += processed_cloud->points[*pit].y;
         numPts++;
 
-        // dist_this_point = pcl::geometry::distance(input_cloud->points[*pit],
+        // dist_this_point = pcl::geometry::distance(processed_cloud->points[*pit],
         //                                          origin);
         // mindist_this_cluster = std::min(dist_this_point, mindist_this_cluster);
       }
 
-      pcl::PointXYZ centroid;
+      pcl::PointXYZI centroid;
       centroid.x = x / numPts;
       centroid.y = y / numPts;
       centroid.z = 0.0;
@@ -604,14 +625,15 @@ cloud_cb(const sensor_msgs::PointCloud2ConstPtr& input)
     // Ensure at least 6 clusters exist to publish (later clusters may be empty)
     while (cluster_vec.size() < 6)
     {
-      pcl::PointCloud<pcl::PointXYZ>::Ptr empty_cluster(new pcl::PointCloud<pcl::PointXYZ>);
-      empty_cluster->points.push_back(pcl::PointXYZ(0, 0, 0));
+      pcl::PointCloud<pcl::PointXYZI>::Ptr empty_cluster(new pcl::PointCloud<pcl::PointXYZI>);
+      pcl::PointXYZI pt;
+      empty_cluster->points.push_back(pt);
       cluster_vec.push_back(empty_cluster);
     }
 
     while (clusterCentroids.size() < 6)
     {
-      pcl::PointXYZ centroid;
+      pcl::PointXYZI centroid;
       centroid.x = 0.0;
       centroid.y = 0.0;
       centroid.z = 0.0;
