@@ -38,11 +38,15 @@
 #include <visualization_msgs/Marker.h>
 #include <visualization_msgs/MarkerArray.h>
 
+// ------- Adi ------
 #include <pcl/filters/passthrough.h>
 #include <pcl/filters/voxel_grid.h>
 #include <pcl_ros/impl/transforms.hpp>
 #include <pcl_ros/transforms.h>
 #include <tf/transform_listener.h>
+
+#include "kf_tracker/KalmanFilterTrack.h"
+#include "kf_tracker/TracksManager.h"
 
 using namespace std;
 using namespace cv;
@@ -53,12 +57,7 @@ ros::Publisher objID_pub;
 int stateDim = 4; // [x,y,v_x,v_y]//,w,h]
 int measDim = 2; // [z_x,z_y,z_w,z_h]
 int ctrlDim = 0;
-cv::KalmanFilter KF0(stateDim, measDim, ctrlDim, CV_32F);
-cv::KalmanFilter KF1(stateDim, measDim, ctrlDim, CV_32F);
-cv::KalmanFilter KF2(stateDim, measDim, ctrlDim, CV_32F);
-cv::KalmanFilter KF3(stateDim, measDim, ctrlDim, CV_32F);
-cv::KalmanFilter KF4(stateDim, measDim, ctrlDim, CV_32F);
-cv::KalmanFilter KF5(stateDim, measDim, ctrlDim, CV_32F);
+TracksManager tracks_manager;
 
 ros::Publisher pub_cluster0;
 ros::Publisher pub_cluster1;
@@ -70,7 +69,7 @@ ros::Publisher pub_cluster5;
 ros::Publisher markerPub;
 ros::Publisher cc_pos;
 
-std::vector<geometry_msgs::Point> prevClusterCenters;
+// std::vector<geometry_msgs::Point> prevClusterCenters;
 
 cv::Mat state(stateDim, 1, CV_32F);
 cv::Mat_<float> measurement(2, 1);
@@ -126,23 +125,35 @@ findIndexOfMin(std::vector<std::vector<float>> distMat)
   // cout << "minIndex=" << minIndex.first << "," << minIndex.second << "\n";
   return minIndex;
 }
+
 void
 KFT(const std_msgs::Float32MultiArray ccs)
 {
   // First predict, to update the internal statePre variable
+  std::vector<cv::Mat> predictions = tracks_manager.predict();
 
-  std::vector<cv::Mat> pred {KF0.predict(), KF1.predict(), KF2.predict(), KF3.predict(), KF4.predict(), KF5.predict()};
-  // cout<<"Pred successfull\n";
+  // transform to geo_msgs  // TODO needed?
+  std::vector<geometry_msgs::Point> KFpredictions;
+  int i = 0;
+  for (auto it = predictions.begin(); it != predictions.end(); it++)
+  {
+    geometry_msgs::Point pt;
+    pt.x = (*it).at<float>(0);
+    pt.y = (*it).at<float>(1);
+    pt.z = (*it).at<float>(2);
+
+    KFpredictions.push_back(pt);
+  }
 
   // cv::Point predictPt(prediction.at<float>(0),prediction.at<float>(1));
   // cout<<"Prediction 1 ="<<prediction.at<float>(0)<<","<<prediction.at<float>(1)<<"\n";
 
   // Get measurements
-  // Extract the position of the clusters forom the multiArray. To check if the data
+  // Extract the position of the clusters from the multiArray. To check if the data
   // coming in, check the .z (every third) coordinate and that will be 0.0
   std::vector<geometry_msgs::Point> clusterCenters; // clusterCenters
 
-  int i = 0;
+  i = 0;
   for (std::vector<float>::const_iterator it = ccs.data.begin(); it != ccs.data.end(); it += 3)
   {
     geometry_msgs::Point pt;
@@ -152,20 +163,6 @@ KFT(const std_msgs::Float32MultiArray ccs)
 
     clusterCenters.push_back(pt);
   }
-
-  //  cout<<"CLusterCenters Obtained"<<"\n";
-  std::vector<geometry_msgs::Point> KFpredictions;
-  i = 0;
-  for (auto it = pred.begin(); it != pred.end(); it++)
-  {
-    geometry_msgs::Point pt;
-    pt.x = (*it).at<float>(0);
-    pt.y = (*it).at<float>(1);
-    pt.z = (*it).at<float>(2);
-
-    KFpredictions.push_back(pt);
-  }
-  // cout<<"Got predictions"<<"\n";
 
   // Find the cluster that is more probable to be belonging to a given KF.
   objID.clear(); // Clear the objID vector
@@ -261,7 +258,7 @@ KFT(const std_msgs::Float32MultiArray ccs)
     clusterMarkers.markers.push_back(m);
   }
 
-  prevClusterCenters = clusterCenters;
+  // prevClusterCenters = clusterCenters;
 
   markerPub.publish(clusterMarkers);
 
@@ -399,17 +396,71 @@ cloud_cb(const PointCloud::ConstPtr& input_cloud)
   * Cluster_indices is a vector containing one instance of PointIndices for each detected
   * cluster.
   */
-  std::vector<pcl::PointIndices> cluster_indices;
+  std::vector<pcl::PointIndices> clusters_indices;
   pcl::EuclideanClusterExtraction<pcl::PointXYZI> eucl_clustering;
   eucl_clustering.setClusterTolerance(clustering_tolerance);
   eucl_clustering.setMinClusterSize(min_pts_in_cluster);
   // eucl_clustering.setMaxClusterSize(600);
   eucl_clustering.setSearchMethod(tree);
   eucl_clustering.setInputCloud(processed_cloud);
-  /* Extract the clusters out of pc and save indices in cluster_indices.*/
-  eucl_clustering.extract(cluster_indices);
+  /* Extract the clusters out of pc and save indices in clusters_indices.*/
+  eucl_clustering.extract(clusters_indices);
 
-  std::cout << "cluster nu: " << cluster_indices.size() << std::endl;
+  std::cout << "cluster nu: " << clusters_indices.size() << std::endl;
+
+  // get cluster centroid
+  // std::vector<int>::const_iterator pit;
+  // Vector of cluster pointclouds
+  std::vector<PointCloud::Ptr> clusters;
+  std::vector<Eigen::Vector4f> clusters_centroids;
+
+  for (const pcl::PointIndices& cluster_ids : clusters_indices)
+  // for (auto cluster_it = clusters_indices.begin(); cluster_it != clusters_indices.end(); ++cluster_it)
+  {
+    // Eigen::Matrix4 cluster_centroid;
+    Eigen::Vector4f cluster_centroid;
+    pcl::compute3DCentroid(*processed_cloud, cluster_ids, cluster_centroid); // in homogenous coords
+    cout << "centroid: " << cluster_centroid << endl;
+
+    clusters_centroids.push_back(cluster_centroid);
+
+    // Extract the cluster pointcloud
+    PointCloud::Ptr cluster_pointcloud(new PointCloud);
+    pcl::copyPointCloud(*processed_cloud, clusters_indices, *cluster_pointcloud);
+
+    clusters.push_back(cluster_pointcloud);
+  }
+
+  // TODO get rid of this crap
+  // Ensure at least 6 clusters exist to publish (later clusters may be empty)
+  while (clusters.size() < 6)
+  {
+    pcl::PointCloud<pcl::PointXYZI>::Ptr empty_cluster(new pcl::PointCloud<pcl::PointXYZI>);
+    pcl::PointXYZI pt;
+    empty_cluster->points.push_back(pt);
+    clusters.push_back(empty_cluster);
+  }
+
+  while (clusters_centroids.size() < 6)
+  {
+    Eigen::Vector4f centroid;
+    centroid[0] = 0.0;
+    centroid[1] = 0.0;
+    centroid[2] = 0.0;
+
+    clusters_centroids.push_back(centroid);
+  }
+
+  // Publish cluster mid-points.
+  std_msgs::Float32MultiArray cc;
+  for (int i = 0; i < 6; i++)
+  {
+    cc.data.push_back(clusters_centroids.at(i)[0]);
+    cc.data.push_back(clusters_centroids.at(i)[1]);
+    cc.data.push_back(clusters_centroids.at(i)[2]);
+  }
+
+  cc_pos.publish(cc);
 
   // cout<<"IF firstFrame="<<firstFrame<<"\n";
   // If this is the first frame, initialize kalman filters for the clustered objects
@@ -418,146 +469,96 @@ cloud_cb(const PointCloud::ConstPtr& input_cloud)
     // Initialize 6 Kalman Filters; Assuming 6 max objects in the dataset.
     // Could be made generic by creating a Kalman Filter only when a new object is detected
 
-    float dvx = 0.01f; // 1.0
-    float dvy = 0.01f; // 1.0
-    float dx = 1.0f;
-    float dy = 1.0f;
-    KF0.transitionMatrix = (Mat_<float>(4, 4) << dx, 0, 1, 0, 0, dy, 0, 1, 0, 0, dvx, 0, 0, 0, 0, dvy);
-    KF1.transitionMatrix = (Mat_<float>(4, 4) << dx, 0, 1, 0, 0, dy, 0, 1, 0, 0, dvx, 0, 0, 0, 0, dvy);
-    KF2.transitionMatrix = (Mat_<float>(4, 4) << dx, 0, 1, 0, 0, dy, 0, 1, 0, 0, dvx, 0, 0, 0, 0, dvy);
-    KF3.transitionMatrix = (Mat_<float>(4, 4) << dx, 0, 1, 0, 0, dy, 0, 1, 0, 0, dvx, 0, 0, 0, 0, dvy);
-    KF4.transitionMatrix = (Mat_<float>(4, 4) << dx, 0, 1, 0, 0, dy, 0, 1, 0, 0, dvx, 0, 0, 0, 0, dvy);
-    KF5.transitionMatrix = (Mat_<float>(4, 4) << dx, 0, 1, 0, 0, dy, 0, 1, 0, 0, dvx, 0, 0, 0, 0, dvy);
+    // float dvx = 0.01f; // 1.0
+    // float dvy = 0.01f; // 1.0
+    // float dx = 1.0f;
+    // float dy = 1.0f;
+    // KF0.transitionMatrix = (Mat_<float>(4, 4) << dx, 0, 1, 0, 0, dy, 0, 1, 0, 0, dvx, 0, 0, 0, 0, dvy);
+    // KF1.transitionMatrix = (Mat_<float>(4, 4) << dx, 0, 1, 0, 0, dy, 0, 1, 0, 0, dvx, 0, 0, 0, 0, dvy);
+    // KF2.transitionMatrix = (Mat_<float>(4, 4) << dx, 0, 1, 0, 0, dy, 0, 1, 0, 0, dvx, 0, 0, 0, 0, dvy);
+    // KF3.transitionMatrix = (Mat_<float>(4, 4) << dx, 0, 1, 0, 0, dy, 0, 1, 0, 0, dvx, 0, 0, 0, 0, dvy);
+    // KF4.transitionMatrix = (Mat_<float>(4, 4) << dx, 0, 1, 0, 0, dy, 0, 1, 0, 0, dvx, 0, 0, 0, 0, dvy);
+    // KF5.transitionMatrix = (Mat_<float>(4, 4) << dx, 0, 1, 0, 0, dy, 0, 1, 0, 0, dvx, 0, 0, 0, 0, dvy);
 
-    cv::setIdentity(KF0.measurementMatrix);
-    cv::setIdentity(KF1.measurementMatrix);
-    cv::setIdentity(KF2.measurementMatrix);
-    cv::setIdentity(KF3.measurementMatrix);
-    cv::setIdentity(KF4.measurementMatrix);
-    cv::setIdentity(KF5.measurementMatrix);
-    // Process Noise Covariance Matrix Q
-    // [ Ex 0  0    0 0    0 ]
-    // [ 0  Ey 0    0 0    0 ]
-    // [ 0  0  Ev_x 0 0    0 ]
-    // [ 0  0  0    1 Ev_y 0 ]
-    //// [ 0  0  0    0 1    Ew ]
-    //// [ 0  0  0    0 0    Eh ]
-    float sigmaP = 0.01;
-    float sigmaQ = 0.1;
-    setIdentity(KF0.processNoiseCov, Scalar::all(sigmaP));
-    setIdentity(KF1.processNoiseCov, Scalar::all(sigmaP));
-    setIdentity(KF2.processNoiseCov, Scalar::all(sigmaP));
-    setIdentity(KF3.processNoiseCov, Scalar::all(sigmaP));
-    setIdentity(KF4.processNoiseCov, Scalar::all(sigmaP));
-    setIdentity(KF5.processNoiseCov, Scalar::all(sigmaP));
-    // Meas noise cov matrix R
-    cv::setIdentity(KF0.measurementNoiseCov, cv::Scalar(sigmaQ)); // 1e-1
-    cv::setIdentity(KF1.measurementNoiseCov, cv::Scalar(sigmaQ));
-    cv::setIdentity(KF2.measurementNoiseCov, cv::Scalar(sigmaQ));
-    cv::setIdentity(KF3.measurementNoiseCov, cv::Scalar(sigmaQ));
-    cv::setIdentity(KF4.measurementNoiseCov, cv::Scalar(sigmaQ));
-    cv::setIdentity(KF5.measurementNoiseCov, cv::Scalar(sigmaQ));
+    // cv::setIdentity(KF0.measurementMatrix);
+    // cv::setIdentity(KF1.measurementMatrix);
+    // cv::setIdentity(KF2.measurementMatrix);
+    // cv::setIdentity(KF3.measurementMatrix);
+    // cv::setIdentity(KF4.measurementMatrix);
+    // cv::setIdentity(KF5.measurementMatrix);
 
-    std::vector<pcl::PointIndices>::const_iterator it;
-    std::vector<int>::const_iterator pit;
-    // Vector of cluster pointclouds
-    std::vector<pcl::PointCloud<pcl::PointXYZI>::Ptr> cluster_vec;
-    // Cluster centroids
-    std::vector<pcl::PointXYZI> clusterCentroids;
+    // // Process Noise Covariance Matrix Q
+    // // [ Ex 0  0    0 0    0 ]
+    // // [ 0  Ey 0    0 0    0 ]
+    // // [ 0  0  Ev_x 0 0    0 ]
+    // // [ 0  0  0    1 Ev_y 0 ]
+    // //// [ 0  0  0    0 1    Ew ]
+    // //// [ 0  0  0    0 0    Eh ]
+    // float sigmaP = 0.01;
+    // float sigmaQ = 0.1;
+    // setIdentity(KF0.processNoiseCov, Scalar::all(sigmaP));
+    // setIdentity(KF1.processNoiseCov, Scalar::all(sigmaP));
+    // setIdentity(KF2.processNoiseCov, Scalar::all(sigmaP));
+    // setIdentity(KF3.processNoiseCov, Scalar::all(sigmaP));
+    // setIdentity(KF4.processNoiseCov, Scalar::all(sigmaP));
+    // setIdentity(KF5.processNoiseCov, Scalar::all(sigmaP));
+    // // Meas noise cov matrix R
+    // cv::setIdentity(KF0.measurementNoiseCov, cv::Scalar(sigmaQ)); // 1e-1
+    // cv::setIdentity(KF1.measurementNoiseCov, cv::Scalar(sigmaQ));
+    // cv::setIdentity(KF2.measurementNoiseCov, cv::Scalar(sigmaQ));
+    // cv::setIdentity(KF3.measurementNoiseCov, cv::Scalar(sigmaQ));
+    // cv::setIdentity(KF4.measurementNoiseCov, cv::Scalar(sigmaQ));
+    // cv::setIdentity(KF5.measurementNoiseCov, cv::Scalar(sigmaQ));
 
-    for (it = cluster_indices.begin(); it != cluster_indices.end(); ++it)
+    // // Set initial state
+    // KF0.statePre.at<float>(0) = clusters_centroids.at(0)[0];
+    // KF0.statePre.at<float>(1) = clusters_centroids.at(0)[1];
+    // KF0.statePre.at<float>(2) = 0; // initial v_x
+    // KF0.statePre.at<float>(3) = 0; // initial v_y
+
+    // // Set initial state
+    // KF1.statePre.at<float>(0) = clusters_centroids.at(1)[0];
+    // KF1.statePre.at<float>(1) = clusters_centroids.at(1)[1];
+    // KF1.statePre.at<float>(2) = 0; // initial v_x
+    // KF1.statePre.at<float>(3) = 0; // initial v_y
+
+    // // Set initial state
+    // KF2.statePre.at<float>(0) = clusters_centroids.at(2)[0];
+    // KF2.statePre.at<float>(1) = clusters_centroids.at(2)[1];
+    // KF2.statePre.at<float>(2) = 0; // initial v_x
+    // KF2.statePre.at<float>(3) = 0; // initial v_y
+
+    // // Set initial state
+    // KF3.statePre.at<float>(0) = clusters_centroids.at(3)[0];
+    // KF3.statePre.at<float>(1) = clusters_centroids.at(3)[1];
+    // KF3.statePre.at<float>(2) = 0; // initial v_x
+    // KF3.statePre.at<float>(3) = 0; // initial v_y
+
+    // // Set initial state
+    // KF4.statePre.at<float>(0) = clusters_centroids.at(4)[0];
+    // KF4.statePre.at<float>(1) = clusters_centroids.at(4)[1];
+    // KF4.statePre.at<float>(2) = 0; // initial v_x
+    // KF4.statePre.at<float>(3) = 0; // initial v_y
+
+    // // Set initial state
+    // KF5.statePre.at<float>(0) = clusters_centroids.at(5)[0];
+    // KF5.statePre.at<float>(1) = clusters_centroids.at(5)[1];
+    // KF5.statePre.at<float>(2) = 0; // initial v_x
+    // KF5.statePre.at<float>(3) = 0; // initial v_y
+
+    for (const auto& centroid : clusters_centroids)
     {
-      pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_cluster(new pcl::PointCloud<pcl::PointXYZI>);
-      float x = 0.0;
-      float y = 0.0;
-      int numPts = 0;
-      for (pit = it->indices.begin(); pit != it->indices.end(); pit++)
-      {
-        cloud_cluster->points.push_back(processed_cloud->points[*pit]);
-        x += processed_cloud->points[*pit].x;
-        y += processed_cloud->points[*pit].y;
-        numPts++;
-
-        // dist_this_point = pcl::geometry::distance(processed_cloud->points[*pit],
-        //                                          origin);
-        // mindist_this_cluster = std::min(dist_this_point, mindist_this_cluster);
-      }
-
-      pcl::PointXYZI centroid;
-      centroid.x = x / numPts;
-      centroid.y = y / numPts;
-      centroid.z = 0.0;
-
-      cluster_vec.push_back(cloud_cluster);
-
-      // Get the centroid of the cluster
-      clusterCentroids.push_back(centroid);
+      tracks_manager.add_track(centroid);
     }
-
-    // Ensure at least 6 clusters exist to publish (later clusters may be empty)
-    while (cluster_vec.size() < 6)
-    {
-      pcl::PointCloud<pcl::PointXYZI>::Ptr empty_cluster(new pcl::PointCloud<pcl::PointXYZI>);
-      pcl::PointXYZI pt;
-      empty_cluster->points.push_back(pt);
-      cluster_vec.push_back(empty_cluster);
-    }
-
-    while (clusterCentroids.size() < 6)
-    {
-      pcl::PointXYZI centroid;
-      centroid.x = 0.0;
-      centroid.y = 0.0;
-      centroid.z = 0.0;
-
-      clusterCentroids.push_back(centroid);
-    }
-
-    // Set initial state
-    KF0.statePre.at<float>(0) = clusterCentroids.at(0).x;
-    KF0.statePre.at<float>(1) = clusterCentroids.at(0).y;
-    KF0.statePre.at<float>(2) = 0; // initial v_x
-    KF0.statePre.at<float>(3) = 0; // initial v_y
-
-    // Set initial state
-    KF1.statePre.at<float>(0) = clusterCentroids.at(1).x;
-    KF1.statePre.at<float>(1) = clusterCentroids.at(1).y;
-    KF1.statePre.at<float>(2) = 0; // initial v_x
-    KF1.statePre.at<float>(3) = 0; // initial v_y
-
-    // Set initial state
-    KF2.statePre.at<float>(0) = clusterCentroids.at(2).x;
-    KF2.statePre.at<float>(1) = clusterCentroids.at(2).y;
-    KF2.statePre.at<float>(2) = 0; // initial v_x
-    KF2.statePre.at<float>(3) = 0; // initial v_y
-
-    // Set initial state
-    KF3.statePre.at<float>(0) = clusterCentroids.at(3).x;
-    KF3.statePre.at<float>(1) = clusterCentroids.at(3).y;
-    KF3.statePre.at<float>(2) = 0; // initial v_x
-    KF3.statePre.at<float>(3) = 0; // initial v_y
-
-    // Set initial state
-    KF4.statePre.at<float>(0) = clusterCentroids.at(4).x;
-    KF4.statePre.at<float>(1) = clusterCentroids.at(4).y;
-    KF4.statePre.at<float>(2) = 0; // initial v_x
-    KF4.statePre.at<float>(3) = 0; // initial v_y
-
-    // Set initial state
-    KF5.statePre.at<float>(0) = clusterCentroids.at(5).x;
-    KF5.statePre.at<float>(1) = clusterCentroids.at(5).y;
-    KF5.statePre.at<float>(2) = 0; // initial v_x
-    KF5.statePre.at<float>(3) = 0; // initial v_y
-
     firstFrame = false;
 
-    for (int i = 0; i < 6; i++)
-    {
-      geometry_msgs::Point pt;
-      pt.x = clusterCentroids.at(i).x;
-      pt.y = clusterCentroids.at(i).y;
-      prevClusterCenters.push_back(pt);
-    }
+    // for (int i = 0; i < 6; i++)
+    // {
+    //   geometry_msgs::Point pt;
+    //   pt.x = clusters_centroids.at(i)[0];
+    //   pt.y = clusters_centroids.at(i)[1];
+    //   prevClusterCenters.push_back(pt);
+    // }
     /*  // Print the initial state of the kalman filter for debugging
      cout<<"KF0.satePre="<<KF0.statePre.at<float>(0)<<","<<KF0.statePre.at<float>(1)<<"\n";
      cout<<"KF1.satePre="<<KF1.statePre.at<float>(0)<<","<<KF1.statePre.at<float>(1)<<"\n";
@@ -573,85 +574,6 @@ cloud_cb(const PointCloud::ConstPtr& input_cloud)
   else
   {
     // cout<<"ELSE firstFrame="<<firstFrame<<"\n";
-
-
-    /* To separate each cluster out of the vector<PointIndices> we have to
-     * iterate through cluster_indices, create a new PointCloud for each
-     * entry and write all points of the current cluster in the PointCloud.
-     */
-    // pcl::PointXYZI origin (0,0,0);
-    // float mindist_this_cluster = 1000;
-    // float dist_this_point = 1000;
-
-    std::vector<pcl::PointIndices>::const_iterator it;
-    std::vector<int>::const_iterator pit;
-    // Vector of cluster pointclouds
-    std::vector<pcl::PointCloud<pcl::PointXYZI>::Ptr> cluster_vec;
-
-    // Cluster centroids
-    std::vector<pcl::PointXYZI> clusterCentroids;
-
-    for (it = cluster_indices.begin(); it != cluster_indices.end(); ++it)
-    {
-      float x = 0.0;
-      float y = 0.0;
-      int numPts = 0;
-      pcl::PointCloud<pcl::PointXYZI>::Ptr cloud_cluster(new pcl::PointCloud<pcl::PointXYZI>);
-      for (pit = it->indices.begin(); pit != it->indices.end(); pit++)
-      {
-        cloud_cluster->points.push_back(processed_cloud->points[*pit]);
-
-        x += processed_cloud->points[*pit].x;
-        y += processed_cloud->points[*pit].y;
-        numPts++;
-
-        // dist_this_point = pcl::geometry::distance(processed_cloud->points[*pit],
-        //                                          origin);
-        // mindist_this_cluster = std::min(dist_this_point, mindist_this_cluster);
-      }
-
-      pcl::PointXYZI centroid;
-      centroid.x = x / numPts;
-      centroid.y = y / numPts;
-      centroid.z = 0.0;
-
-      cluster_vec.push_back(cloud_cluster);
-
-      // Get the centroid of the cluster
-      clusterCentroids.push_back(centroid);
-    }
-    // cout<<"cluster_vec got some clusters\n";
-
-    // Ensure at least 6 clusters exist to publish (later clusters may be empty)
-    while (cluster_vec.size() < 6)
-    {
-      pcl::PointCloud<pcl::PointXYZI>::Ptr empty_cluster(new pcl::PointCloud<pcl::PointXYZI>);
-      pcl::PointXYZI pt;
-      empty_cluster->points.push_back(pt);
-      cluster_vec.push_back(empty_cluster);
-    }
-
-    while (clusterCentroids.size() < 6)
-    {
-      pcl::PointXYZI centroid;
-      centroid.x = 0.0;
-      centroid.y = 0.0;
-      centroid.z = 0.0;
-
-      clusterCentroids.push_back(centroid);
-    }
-
-    // Publish cluster mid-points.
-    std_msgs::Float32MultiArray cc;
-    for (int i = 0; i < 6; i++)
-    {
-      cc.data.push_back(clusterCentroids.at(i).x);
-      cc.data.push_back(clusterCentroids.at(i).y);
-      cc.data.push_back(clusterCentroids.at(i).z);
-    }
-
-    cc_pos.publish(cc);
-
     KFT(cc);
 
     int i = 0;
@@ -662,35 +584,35 @@ cloud_cb(const PointCloud::ConstPtr& input_cloud)
       {
         case 0:
         {
-          publish_cloud(pub_cluster0, cluster_vec[*it]);
+          publish_cloud(pub_cluster0, clusters[*it]);
           publishedCluster[i] = true; // Use this flag to publish only once for a given obj ID
           i++;
           break;
         }
         case 1:
         {
-          publish_cloud(pub_cluster1, cluster_vec[*it]);
+          publish_cloud(pub_cluster1, clusters[*it]);
           publishedCluster[i] = true; // Use this flag to publish only once for a given obj ID
           i++;
           break;
         }
         case 2:
         {
-          publish_cloud(pub_cluster2, cluster_vec[*it]);
+          publish_cloud(pub_cluster2, clusters[*it]);
           publishedCluster[i] = true; // Use this flag to publish only once for a given obj ID
           i++;
           break;
         }
         case 3:
         {
-          publish_cloud(pub_cluster3, cluster_vec[*it]);
+          publish_cloud(pub_cluster3, clusters[*it]);
           publishedCluster[i] = true; // Use this flag to publish only once for a given obj ID
           i++;
           break;
         }
         case 4:
         {
-          publish_cloud(pub_cluster4, cluster_vec[*it]);
+          publish_cloud(pub_cluster4, clusters[*it]);
           publishedCluster[i] = true; // Use this flag to publish only once for a given obj ID
           i++;
           break;
@@ -698,7 +620,7 @@ cloud_cb(const PointCloud::ConstPtr& input_cloud)
 
         case 5:
         {
-          publish_cloud(pub_cluster5, cluster_vec[*it]);
+          publish_cloud(pub_cluster5, clusters[*it]);
           publishedCluster[i] = true; // Use this flag to publish only once for a given obj ID
           i++;
           break;
